@@ -1,0 +1,92 @@
+name: Flutter CI (Windows)
+
+###############################################################################
+# 1  Triggers
+###############################################################################
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+###############################################################################
+# 2  Single‑runner job
+###############################################################################
+jobs:
+  build:
+    runs-on: windows-latest
+
+    ###########################################################################
+    # 3  Environment variables (optional tweaks)
+    ###########################################################################
+    env:
+      FLUTTER_CHANNEL: stable
+      COVERAGE_THRESHOLD: '70'      # adjust as the suite grows
+
+    ###########################################################################
+    # 4  Steps
+    ###########################################################################
+    steps:
+      # 4.1 Checkout repo
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 4.2 Install Flutter (cached)
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      # 4.3 Install Android SDK
+      - uses: android-actions/setup-android@v3   # CLI tools + platform 34
+      - run: flutter doctor -v                   # sanity output in log
+
+      # 4.4 Fetch pub packages
+      - name: Install dependencies
+        run: flutter pub get
+
+      # 4.5 Static analysis
+      - name: Lint
+        run: flutter analyze --no-pub
+
+      # 4.6 Unit / widget tests + coverage gate
+      - name: Test
+        shell: bash
+        run: |
+          flutter test --coverage
+          lines=$(lcov --summary coverage/lcov.info | grep lines | awk '{print substr($4, 1, length($4)-1)}')
+          echo "Coverage: $lines%"
+          if [[ "$lines" != "" && $(echo "$lines < $COVERAGE_THRESHOLD" | bc -l) -eq 1 ]]; then
+            echo "🔴 Coverage gate failed (<$COVERAGE_THRESHOLD%)"
+            exit 1
+          fi
+
+      # 4.7 Build Android debug APK
+      - name: Build Android (debug)
+        run: flutter build apk --debug
+
+      # 4.8 Build Windows desktop release
+      - name: Build Windows (release)
+        run: flutter build windows --release
+
+      # 4.9 Upload artefacts for QA
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-builds
+          retention-days: 7
+          path: |
+            build\app\outputs\flutter-apk\app-debug.apk
+            build\windows\runner\Release\  # whole folder → zipped automatically
+
+      # 4.10 (OPTIONAL) Slack notification on failure
+      - name: Notify Slack
+        if: failure() && github.event_name == 'push'
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ *${{ github.repository }}* CI failed (<${{ github.run_url }}|details>)"
+            }
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
